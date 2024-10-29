@@ -1,3 +1,4 @@
+use clippy_config::Conf;
 use clippy_utils::diagnostics::span_lint_and_sugg;
 use clippy_utils::is_in_test;
 use clippy_utils::source::{snippet, snippet_with_applicability};
@@ -9,7 +10,7 @@ use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_middle::ty;
 use rustc_session::impl_lint_pass;
 use rustc_span::symbol::kw;
-use rustc_span::{sym, BytePos};
+use rustc_span::{BytePos, sym};
 
 declare_clippy_lint! {
     /// ### What it does
@@ -97,17 +98,16 @@ declare_clippy_lint! {
     "lint `use _::*` statements"
 }
 
-#[derive(Default)]
 pub struct WildcardImports {
     warn_on_all: bool,
     allowed_segments: FxHashSet<String>,
 }
 
 impl WildcardImports {
-    pub fn new(warn_on_all: bool, allowed_wildcard_imports: FxHashSet<String>) -> Self {
+    pub fn new(conf: &'static Conf) -> Self {
         Self {
-            warn_on_all,
-            allowed_segments: allowed_wildcard_imports,
+            warn_on_all: conf.warn_on_all_wildcard_imports,
+            allowed_segments: conf.allowed_wildcard_imports.iter().cloned().collect(),
         }
     }
 }

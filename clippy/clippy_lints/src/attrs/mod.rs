@@ -1,12 +1,9 @@
-//! checks for attributes
-
 mod allow_attributes;
 mod allow_attributes_without_reason;
 mod blanket_clippy_restriction_lints;
 mod deprecated_cfg_attr;
 mod deprecated_semver;
 mod duplicated_attributes;
-mod empty_line_after;
 mod inline_always;
 mod mixed_attributes_style;
 mod non_minimal_cfg;
@@ -15,8 +12,9 @@ mod unnecessary_clippy_cfg;
 mod useless_attribute;
 mod utils;
 
+use clippy_config::Conf;
 use clippy_config::msrvs::{self, Msrv};
-use rustc_ast::{Attribute, MetaItemKind, NestedMetaItem};
+use rustc_ast::{Attribute, MetaItemInner, MetaItemKind};
 use rustc_hir::{ImplItem, Item, ItemKind, TraitItem};
 use rustc_lint::{EarlyContext, EarlyLintPass, LateContext, LateLintPass};
 use rustc_session::impl_lint_pass;
@@ -129,94 +127,6 @@ declare_clippy_lint! {
 
 declare_clippy_lint! {
     /// ### What it does
-    /// Checks for empty lines after outer attributes
-    ///
-    /// ### Why is this bad?
-    /// Most likely the attribute was meant to be an inner attribute using a '!'.
-    /// If it was meant to be an outer attribute, then the following item
-    /// should not be separated by empty lines.
-    ///
-    /// ### Known problems
-    /// Can cause false positives.
-    ///
-    /// From the clippy side it's difficult to detect empty lines between an attributes and the
-    /// following item because empty lines and comments are not part of the AST. The parsing
-    /// currently works for basic cases but is not perfect.
-    ///
-    /// ### Example
-    /// ```no_run
-    /// #[allow(dead_code)]
-    ///
-    /// fn not_quite_good_code() { }
-    /// ```
-    ///
-    /// Use instead:
-    /// ```no_run
-    /// // Good (as inner attribute)
-    /// #![allow(dead_code)]
-    ///
-    /// fn this_is_fine() { }
-    ///
-    /// // or
-    ///
-    /// // Good (as outer attribute)
-    /// #[allow(dead_code)]
-    /// fn this_is_fine_too() { }
-    /// ```
-    #[clippy::version = "pre 1.29.0"]
-    pub EMPTY_LINE_AFTER_OUTER_ATTR,
-    nursery,
-    "empty line after outer attribute"
-}
-
-declare_clippy_lint! {
-    /// ### What it does
-    /// Checks for empty lines after documentation comments.
-    ///
-    /// ### Why is this bad?
-    /// The documentation comment was most likely meant to be an inner attribute or regular comment.
-    /// If it was intended to be a documentation comment, then the empty line should be removed to
-    /// be more idiomatic.
-    ///
-    /// ### Known problems
-    /// Only detects empty lines immediately following the documentation. If the doc comment is followed
-    /// by an attribute and then an empty line, this lint will not trigger. Use `empty_line_after_outer_attr`
-    /// in combination with this lint to detect both cases.
-    ///
-    /// Does not detect empty lines after doc attributes (e.g. `#[doc = ""]`).
-    ///
-    /// ### Example
-    /// ```no_run
-    /// /// Some doc comment with a blank line after it.
-    ///
-    /// fn not_quite_good_code() { }
-    /// ```
-    ///
-    /// Use instead:
-    /// ```no_run
-    /// /// Good (no blank line)
-    /// fn this_is_fine() { }
-    /// ```
-    ///
-    /// ```no_run
-    /// // Good (convert to a regular comment)
-    ///
-    /// fn this_is_fine_too() { }
-    /// ```
-    ///
-    /// ```no_run
-    /// //! Good (convert to a comment on an inner attribute)
-    ///
-    /// fn this_is_fine_as_well() { }
-    /// ```
-    #[clippy::version = "1.70.0"]
-    pub EMPTY_LINE_AFTER_DOC_COMMENTS,
-    nursery,
-    "empty line after documentation comments"
-}
-
-declare_clippy_lint! {
-    /// ### What it does
     /// Checks for `warn`/`deny`/`forbid` attributes targeting the whole clippy::restriction category.
     ///
     /// ### Why is this bad?
@@ -309,8 +219,8 @@ declare_clippy_lint! {
     /// ```rust,ignore
     /// #[allow(unused_mut)]
     /// fn foo() -> usize {
-    ///    let mut a = Vec::new();
-    ///    a.len()
+    ///     let mut a = Vec::new();
+    ///     a.len()
     /// }
     /// ```
     /// Use instead:
@@ -499,7 +409,6 @@ declare_clippy_lint! {
     "duplicated attribute"
 }
 
-#[derive(Clone)]
 pub struct Attributes {
     msrv: Msrv,
 }
@@ -517,9 +426,10 @@ impl_lint_pass!(Attributes => [
 ]);
 
 impl Attributes {
-    #[must_use]
-    pub fn new(msrv: Msrv) -> Self {
-        Self { msrv }
+    pub fn new(conf: &'static Conf) -> Self {
+        Self {
+            msrv: conf.msrv.clone(),
+        }
     }
 }
 
@@ -546,7 +456,7 @@ impl<'tcx> LateLintPass<'tcx> for Attributes {
                     return;
                 }
                 for item in items {
-                    if let NestedMetaItem::MetaItem(mi) = &item
+                    if let MetaItemInner::MetaItem(mi) = &item
                         && let MetaItemKind::NameValue(lit) = &mi.kind
                         && mi.has_name(sym::since)
                     {
@@ -589,23 +499,25 @@ impl<'tcx> LateLintPass<'tcx> for Attributes {
 }
 
 pub struct EarlyAttributes {
-    pub msrv: Msrv,
+    msrv: Msrv,
+}
+
+impl EarlyAttributes {
+    pub fn new(conf: &'static Conf) -> Self {
+        Self {
+            msrv: conf.msrv.clone(),
+        }
+    }
 }
 
 impl_lint_pass!(EarlyAttributes => [
     DEPRECATED_CFG_ATTR,
-    EMPTY_LINE_AFTER_OUTER_ATTR,
-    EMPTY_LINE_AFTER_DOC_COMMENTS,
     NON_MINIMAL_CFG,
     DEPRECATED_CLIPPY_CFG_ATTR,
     UNNECESSARY_CLIPPY_CFG,
 ]);
 
 impl EarlyLintPass for EarlyAttributes {
-    fn check_item(&mut self, cx: &EarlyContext<'_>, item: &rustc_ast::Item) {
-        empty_line_after::check(cx, item);
-    }
-
     fn check_attribute(&mut self, cx: &EarlyContext<'_>, attr: &Attribute) {
         deprecated_cfg_attr::check(cx, attr, &self.msrv);
         deprecated_cfg_attr::check_clippy(cx, attr);
