@@ -12,8 +12,8 @@ use rustc_hir::def_id::DefId;
 use rustc_hir::{Expr, FnDecl, LangItem, Safety, TyKind};
 use rustc_infer::infer::TyCtxtInferExt;
 use rustc_lint::LateContext;
-use rustc_middle::mir::interpret::Scalar;
 use rustc_middle::mir::ConstValue;
+use rustc_middle::mir::interpret::Scalar;
 use rustc_middle::traits::EvaluationResult;
 use rustc_middle::ty::layout::ValidityRequirement;
 use rustc_middle::ty::{
@@ -22,7 +22,7 @@ use rustc_middle::ty::{
     TypeVisitable, TypeVisitableExt, TypeVisitor, UintTy, Upcast, VariantDef, VariantDiscr,
 };
 use rustc_span::symbol::Ident;
-use rustc_span::{sym, Span, Symbol, DUMMY_SP};
+use rustc_span::{DUMMY_SP, Span, Symbol, sym};
 use rustc_target::abi::VariantIdx;
 use rustc_trait_selection::traits::query::evaluate_obligation::InferCtxtExt as _;
 use rustc_trait_selection::traits::query::normalize::QueryNormalizeExt;
@@ -160,8 +160,10 @@ pub fn get_type_diagnostic_name(cx: &LateContext<'_>, ty: Ty<'_>) -> Option<Symb
 }
 
 /// Returns true if `ty` is a type on which calling `Clone` through a function instead of
-/// as a method, such as `Arc::clone()` is considered idiomatic. Lints should avoid suggesting to
-/// replace instances of `ty::Clone()` by `.clone()` for objects of those types.
+/// as a method, such as `Arc::clone()` is considered idiomatic.
+///
+/// Lints should avoid suggesting to replace instances of `ty::Clone()` by `.clone()` for objects
+/// of those types.
 pub fn should_call_clone_as_function(cx: &LateContext<'_>, ty: Ty<'_>) -> bool {
     matches!(
         get_type_diagnostic_name(cx, ty),
@@ -398,8 +400,10 @@ fn is_normalizable_helper<'tcx>(
 }
 
 /// Returns `true` if the given type is a non aggregate primitive (a `bool` or `char`, any
-/// integer or floating-point number type). For checking aggregation of primitive types (e.g.
-/// tuples and slices of primitive type) see `is_recursively_primitive_type`
+/// integer or floating-point number type).
+///
+/// For checking aggregation of primitive types (e.g. tuples and slices of primitive type) see
+/// `is_recursively_primitive_type`
 pub fn is_non_aggregate_primitive_type(ty: Ty<'_>) -> bool {
     matches!(ty.kind(), ty::Bool | ty::Char | ty::Int(_) | ty::Uint(_) | ty::Float(_))
 }
@@ -455,11 +459,6 @@ pub fn is_type_lang_item(cx: &LateContext<'_>, ty: Ty<'_>, lang_item: LangItem) 
     }
 }
 
-/// Gets the diagnostic name of the type, if it has one
-pub fn type_diagnostic_name(cx: &LateContext<'_>, ty: Ty<'_>) -> Option<Symbol> {
-    ty.ty_adt_def().and_then(|adt| cx.tcx.get_diagnostic_name(adt.did()))
-}
-
 /// Return `true` if the passed `typ` is `isize` or `usize`.
 pub fn is_isize_or_usize(typ: Ty<'_>) -> bool {
     matches!(typ.kind(), ty::Int(IntTy::Isize) | ty::Uint(UintTy::Usize))
@@ -476,9 +475,10 @@ pub fn match_type(cx: &LateContext<'_>, ty: Ty<'_>, path: &[&str]) -> bool {
     }
 }
 
-/// Checks if the drop order for a type matters. Some std types implement drop solely to
-/// deallocate memory. For these types, and composites containing them, changing the drop order
-/// won't result in any observable side effects.
+/// Checks if the drop order for a type matters.
+///
+/// Some std types implement drop solely to deallocate memory. For these types, and composites
+/// containing them, changing the drop order won't result in any observable side effects.
 pub fn needs_ordered_drop<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
     fn needs_ordered_drop_inner<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>, seen: &mut FxHashSet<Ty<'tcx>>) -> bool {
         if !seen.insert(ty) {
@@ -525,19 +525,6 @@ pub fn needs_ordered_drop<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
     needs_ordered_drop_inner(cx, ty, &mut FxHashSet::default())
 }
 
-/// Peels off all references on the type. Returns the underlying type and the number of references
-/// removed.
-pub fn peel_mid_ty_refs(ty: Ty<'_>) -> (Ty<'_>, usize) {
-    fn peel(ty: Ty<'_>, count: usize) -> (Ty<'_>, usize) {
-        if let ty::Ref(_, ty, _) = ty.kind() {
-            peel(*ty, count + 1)
-        } else {
-            (ty, count)
-        }
-    }
-    peel(ty, 0)
-}
-
 /// Peels off all references on the type. Returns the underlying type, the number of references
 /// removed, and whether the pointer is ultimately mutable or not.
 pub fn peel_mid_ty_refs_is_mutable(ty: Ty<'_>) -> (Ty<'_>, usize, Mutability) {
@@ -554,7 +541,7 @@ pub fn peel_mid_ty_refs_is_mutable(ty: Ty<'_>) -> (Ty<'_>, usize, Mutability) {
 /// Returns `true` if the given type is an `unsafe` function.
 pub fn type_is_unsafe_function<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
     match ty.kind() {
-        ty::FnDef(..) | ty::FnPtr(_) => ty.fn_sig(cx.tcx).safety() == Safety::Unsafe,
+        ty::FnDef(..) | ty::FnPtr(..) => ty.fn_sig(cx.tcx).safety() == Safety::Unsafe,
         _ => false,
     }
 }
@@ -619,10 +606,13 @@ fn is_uninit_value_valid_for_ty_fallback<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'t
         ty::Tuple(types) => types.iter().all(|ty| is_uninit_value_valid_for_ty(cx, ty)),
         // Unions are always fine right now.
         // This includes MaybeUninit, the main way people use uninitialized memory.
-        // For ADTs, we could look at all fields just like for tuples, but that's potentially
-        // exponential, so let's avoid doing that for now. Code doing that is sketchy enough to
-        // just use an `#[allow()]`.
-        ty::Adt(adt, _) => adt.is_union(),
+        ty::Adt(adt, _) if adt.is_union() => true,
+        // Types (e.g. `UnsafeCell<MaybeUninit<T>>`) that recursively contain only types that can be uninit
+        // can themselves be uninit too.
+        // This purposefully ignores enums as they may have a discriminant that can't be uninit.
+        ty::Adt(adt, args) if adt.is_struct() => adt
+            .all_fields()
+            .all(|field| is_uninit_value_valid_for_ty(cx, field.ty(cx.tcx, args))),
         // For the rest, conservatively assume that they cannot be uninit.
         _ => false,
     }
@@ -717,8 +707,8 @@ pub fn expr_sig<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'_>) -> Option<ExprFnS
 
 /// If the type is function like, get the signature for it.
 pub fn ty_sig<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> Option<ExprFnSig<'tcx>> {
-    if ty.is_box() {
-        return ty_sig(cx, ty.boxed_ty());
+    if let Some(boxed_ty) = ty.boxed_ty() {
+        return ty_sig(cx, boxed_ty);
     }
     match *ty.kind() {
         ty::Closure(id, subs) => {
@@ -734,7 +724,7 @@ pub fn ty_sig<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> Option<ExprFnSig<'t
             cx.tcx.item_super_predicates(def_id).iter_instantiated(cx.tcx, args),
             cx.tcx.opt_parent(def_id),
         ),
-        ty::FnPtr(sig) => Some(ExprFnSig::Sig(sig, None)),
+        ty::FnPtr(sig_tys, hdr) => Some(ExprFnSig::Sig(sig_tys.with(hdr), None)),
         ty::Dynamic(bounds, _, _) => {
             let lang_items = cx.tcx.lang_items();
             match bounds.principal() {
@@ -1182,12 +1172,12 @@ pub struct InteriorMut<'tcx> {
 }
 
 impl<'tcx> InteriorMut<'tcx> {
-    pub fn new(cx: &LateContext<'tcx>, ignore_interior_mutability: &[String]) -> Self {
+    pub fn new(tcx: TyCtxt<'tcx>, ignore_interior_mutability: &[String]) -> Self {
         let ignored_def_ids = ignore_interior_mutability
             .iter()
             .flat_map(|ignored_ty| {
                 let path: Vec<&str> = ignored_ty.split("::").collect();
-                def_path_def_ids(cx, path.as_slice())
+                def_path_def_ids(tcx, path.as_slice())
             })
             .collect();
 
@@ -1197,10 +1187,10 @@ impl<'tcx> InteriorMut<'tcx> {
         }
     }
 
-    pub fn without_pointers(cx: &LateContext<'tcx>, ignore_interior_mutability: &[String]) -> Self {
+    pub fn without_pointers(tcx: TyCtxt<'tcx>, ignore_interior_mutability: &[String]) -> Self {
         Self {
             ignore_pointers: true,
-            ..Self::new(cx, ignore_interior_mutability)
+            ..Self::new(tcx, ignore_interior_mutability)
         }
     }
 
@@ -1324,11 +1314,12 @@ pub fn deref_chain<'cx, 'tcx>(cx: &'cx LateContext<'tcx>, ty: Ty<'tcx>) -> impl 
 }
 
 /// Checks if a Ty<'_> has some inherent method Symbol.
+///
 /// This does not look for impls in the type's `Deref::Target` type.
 /// If you need this, you should wrap this call in `clippy_utils::ty::deref_chain().any(...)`.
 pub fn get_adt_inherent_method<'a>(cx: &'a LateContext<'_>, ty: Ty<'_>, method_name: Symbol) -> Option<&'a AssocItem> {
     if let Some(ty_did) = ty.ty_adt_def().map(AdtDef::did) {
-        cx.tcx.inherent_impls(ty_did).into_iter().flatten().find_map(|&did| {
+        cx.tcx.inherent_impls(ty_did).iter().find_map(|&did| {
             cx.tcx
                 .associated_items(did)
                 .filter_by_name_unhygienic(method_name)

@@ -1,3 +1,4 @@
+use clippy_config::Conf;
 use clippy_config::msrvs::{self, Msrv};
 use clippy_utils::diagnostics::span_lint_and_then;
 use clippy_utils::source::{trim_span, walk_span_to_context};
@@ -34,8 +35,10 @@ pub struct AlmostCompleteRange {
     msrv: Msrv,
 }
 impl AlmostCompleteRange {
-    pub fn new(msrv: Msrv) -> Self {
-        Self { msrv }
+    pub fn new(conf: &'static Conf) -> Self {
+        Self {
+            msrv: conf.msrv.clone(),
+        }
     }
 }
 impl EarlyLintPass for AlmostCompleteRange {
