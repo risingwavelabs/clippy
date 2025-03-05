@@ -5,7 +5,8 @@ use clippy_utils::source::snippet;
 use clippy_utils::visitors::for_each_expr;
 use clippy_utils::{inherits_cfg, is_from_proc_macro, is_self};
 use core::ops::ControlFlow;
-use rustc_data_structures::fx::{FxHashSet, FxIndexMap};
+use rustc_abi::ExternAbi;
+use rustc_data_structures::fx::{FxHashSet, FxIndexMap, FxIndexSet};
 use rustc_errors::Applicability;
 use rustc_hir::intravisit::FnKind;
 use rustc_hir::{
@@ -20,7 +21,6 @@ use rustc_session::impl_lint_pass;
 use rustc_span::Span;
 use rustc_span::def_id::LocalDefId;
 use rustc_span::symbol::kw;
-use rustc_target::spec::abi::Abi;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -101,9 +101,8 @@ fn check_closures<'tcx>(
     ctx: &mut MutablyUsedVariablesCtxt<'tcx>,
     cx: &LateContext<'tcx>,
     checked_closures: &mut FxHashSet<LocalDefId>,
-    closures: FxHashSet<LocalDefId>,
+    closures: FxIndexSet<LocalDefId>,
 ) {
-    let hir = cx.tcx.hir();
     for closure in closures {
         if !checked_closures.insert(closure) {
             continue;
@@ -114,7 +113,7 @@ fn check_closures<'tcx>(
             .tcx
             .hir_node_by_def_id(closure)
             .associated_body()
-            .map(|(_, body_id)| hir.body(body_id))
+            .map(|(_, body_id)| cx.tcx.hir_body(body_id))
         {
             euv::ExprUseVisitor::for_clippy(cx, closure, &mut *ctx)
                 .consume_body(body)
@@ -149,7 +148,7 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessPassByRefMut<'tcx> {
                     return;
                 }
                 let attrs = cx.tcx.hir().attrs(hir_id);
-                if header.abi != Abi::Rust || requires_exact_signature(attrs) {
+                if header.abi != ExternAbi::Rust || requires_exact_signature(attrs) {
                     return;
                 }
                 header.is_async()
@@ -183,7 +182,7 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessPassByRefMut<'tcx> {
             .iter()
             .zip(fn_sig.inputs())
             .zip(body.params)
-            .filter(|((&input, &ty), arg)| !should_skip(cx, input, ty, arg))
+            .filter(|&((&input, &ty), arg)| !should_skip(cx, input, ty, arg))
             .peekable();
         if it.peek().is_none() {
             return;
@@ -196,7 +195,7 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessPassByRefMut<'tcx> {
                 prev_bind: None,
                 prev_move_to_closure: HirIdSet::default(),
                 aliases: HirIdMap::default(),
-                async_closures: FxHashSet::default(),
+                async_closures: FxIndexSet::default(),
                 tcx: cx.tcx,
             };
             euv::ExprUseVisitor::for_clippy(cx, fn_def_id, &mut ctx)
@@ -207,7 +206,7 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessPassByRefMut<'tcx> {
 
             // We retrieve all the closures declared in the function because they will not be found
             // by `euv::Delegate`.
-            let mut closures: FxHashSet<LocalDefId> = FxHashSet::default();
+            let mut closures: FxIndexSet<LocalDefId> = FxIndexSet::default();
             for_each_expr(cx, body, |expr| {
                 if let ExprKind::Closure(closure) = expr.kind {
                     closures.insert(closure.def_id);
@@ -307,7 +306,7 @@ struct MutablyUsedVariablesCtxt<'tcx> {
     /// use of a variable.
     prev_move_to_closure: HirIdSet,
     aliases: HirIdMap<HirId>,
-    async_closures: FxHashSet<LocalDefId>,
+    async_closures: FxIndexSet<LocalDefId>,
     tcx: TyCtxt<'tcx>,
 }
 
@@ -351,9 +350,8 @@ impl MutablyUsedVariablesCtxt<'_> {
     // The goal here is to find if the current scope is unsafe or not. It stops when it finds
     // a function or an unsafe block.
     fn is_in_unsafe_block(&self, item: HirId) -> bool {
-        let hir = self.tcx.hir();
-        for (parent, node) in hir.parent_iter(item) {
-            if let Some(fn_sig) = hir.fn_sig_by_hir_id(parent) {
+        for (parent, node) in self.tcx.hir_parent_iter(item) {
+            if let Some(fn_sig) = self.tcx.hir_fn_sig_by_hir_id(parent) {
                 return fn_sig.header.is_unsafe();
             } else if let Node::Block(block) = node {
                 if matches!(block.rules, BlockCheckMode::UnsafeBlock(_)) {
@@ -417,8 +415,8 @@ impl<'tcx> euv::Delegate<'tcx> for MutablyUsedVariablesCtxt<'tcx> {
             // a closure, it'll return this variant whereas if you have just an index access, it'll
             // return `ImmBorrow`. So if there is "Unique" and it's a mutable reference, we add it
             // to the mutably used variables set.
-            if borrow == ty::BorrowKind::MutBorrow
-                || (borrow == ty::BorrowKind::UniqueImmBorrow && base_ty.ref_mutability() == Some(Mutability::Mut))
+            if borrow == ty::BorrowKind::Mutable
+                || (borrow == ty::BorrowKind::UniqueImmutable && base_ty.ref_mutability() == Some(Mutability::Mut))
             {
                 self.add_mutably_used_var(*vid);
             } else if self.is_in_unsafe_block(id) {
@@ -426,7 +424,7 @@ impl<'tcx> euv::Delegate<'tcx> for MutablyUsedVariablesCtxt<'tcx> {
                 // upon!
                 self.add_mutably_used_var(*vid);
             }
-        } else if borrow == ty::ImmBorrow {
+        } else if borrow == ty::BorrowKind::Immutable {
             // If there is an `async block`, it'll contain a call to a closure which we need to
             // go into to ensure all "mutate" checks are found.
             if let Node::Expr(Expr {

@@ -151,7 +151,7 @@ struct FormatImplExpr<'a, 'tcx> {
 impl FormatImplExpr<'_, '_> {
     fn check_to_string_in_display(&self) {
         if self.format_trait_impl.name == sym::Display
-            && let ExprKind::MethodCall(path, self_arg, ..) = self.expr.kind
+            && let ExprKind::MethodCall(path, self_arg, [], _) = self.expr.kind
             // Get the hir_id of the object we are calling the method on
             // Is the method to_string() ?
             && path.ident.name == sym::to_string
@@ -262,7 +262,7 @@ fn is_format_trait_impl(cx: &LateContext<'_>, impl_item: &ImplItem<'_>) -> Optio
         && let Some(name) = cx.tcx.get_diagnostic_name(did)
         && matches!(name, sym::Debug | sym::Display)
     {
-        let body = cx.tcx.hir().body(body_id);
+        let body = cx.tcx.hir_body(body_id);
         let formatter_name = body
             .params
             .get(1)

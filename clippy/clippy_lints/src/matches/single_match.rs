@@ -9,9 +9,9 @@ use rustc_arena::DroplessArena;
 use rustc_errors::Applicability;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::intravisit::{Visitor, walk_pat};
-use rustc_hir::{Arm, Expr, ExprKind, HirId, Node, Pat, PatKind, QPath, StmtKind};
+use rustc_hir::{Arm, Expr, ExprKind, HirId, Node, Pat, PatExpr, PatExprKind, PatKind, QPath, StmtKind};
 use rustc_lint::LateContext;
-use rustc_middle::ty::{self, AdtDef, ParamEnv, TyCtxt, TypeckResults, VariantDef};
+use rustc_middle::ty::{self, AdtDef, TyCtxt, TypeckResults, VariantDef};
 use rustc_span::{Span, sym};
 
 use super::{MATCH_BOOL, SINGLE_MATCH, SINGLE_MATCH_ELSE};
@@ -67,7 +67,6 @@ pub(crate) fn check<'tcx>(cx: &LateContext<'tcx>, ex: &'tcx Expr<'_>, arms: &'tc
             if v.has_enum {
                 let cx = PatCtxt {
                     tcx: cx.tcx,
-                    param_env: cx.param_env,
                     typeck,
                     arena: DroplessArena::default(),
                 };
@@ -115,7 +114,7 @@ fn report_single_pattern(cx: &LateContext<'_>, ex: &Expr<'_>, arm: &Arm<'_>, exp
     }
 
     let (pat, pat_ref_count) = peel_hir_pat_refs(arm.pat);
-    let (msg, sugg) = if let PatKind::Path(_) | PatKind::Lit(_) = pat.kind
+    let (msg, sugg) = if let PatKind::Expr(_) = pat.kind
         && let (ty, ty_ref_count) = peel_middle_ty_refs(cx.typeck_results().expr_ty(ex))
         && let Some(spe_trait_id) = cx.tcx.lang_items().structural_peq_trait()
         && let Some(pe_trait_id) = cx.tcx.lang_items().eq_trait()
@@ -127,10 +126,10 @@ fn report_single_pattern(cx: &LateContext<'_>, ex: &Expr<'_>, arm: &Arm<'_>, exp
         // scrutinee derives PartialEq and the pattern is a constant.
         let pat_ref_count = match pat.kind {
             // string literals are already a reference.
-            PatKind::Lit(Expr {
-                kind: ExprKind::Lit(lit),
+            PatKind::Expr(PatExpr {
+                kind: PatExprKind::Lit { lit, negated: false },
                 ..
-            }) if lit.node.is_str() => pat_ref_count + 1,
+            }) if lit.node.is_str() || lit.node.is_bytestr() => pat_ref_count + 1,
             _ => pat_ref_count,
         };
         // References are only implicitly added to the pattern, so no overflow here.
@@ -176,7 +175,7 @@ impl<'tcx> Visitor<'tcx> for PatVisitor<'tcx> {
         if matches!(pat.kind, PatKind::Binding(..)) {
             ControlFlow::Break(())
         } else {
-            self.has_enum |= self.typeck.pat_ty(pat).ty_adt_def().map_or(false, AdtDef::is_enum);
+            self.has_enum |= self.typeck.pat_ty(pat).ty_adt_def().is_some_and(AdtDef::is_enum);
             walk_pat(self, pat)
         }
     }
@@ -185,7 +184,6 @@ impl<'tcx> Visitor<'tcx> for PatVisitor<'tcx> {
 /// The context needed to manipulate a `PatState`.
 struct PatCtxt<'tcx> {
     tcx: TyCtxt<'tcx>,
-    param_env: ParamEnv<'tcx>,
     typeck: &'tcx TypeckResults<'tcx>,
     arena: DroplessArena,
 }
@@ -249,7 +247,10 @@ impl<'a> PatState<'a> {
         let states = match self {
             Self::Wild => return None,
             Self::Other => {
-                *self = Self::StdEnum(cx.arena.alloc_from_iter((0..adt.variants().len()).map(|_| Self::Other)));
+                *self = Self::StdEnum(
+                    cx.arena
+                        .alloc_from_iter(std::iter::repeat_with(|| Self::Other).take(adt.variants().len())),
+                );
                 let Self::StdEnum(x) = self else {
                     unreachable!();
                 };
@@ -330,15 +331,21 @@ impl<'a> PatState<'a> {
     #[expect(clippy::similar_names)]
     fn add_pat<'tcx>(&mut self, cx: &'a PatCtxt<'tcx>, pat: &'tcx Pat<'_>) -> bool {
         match pat.kind {
-            PatKind::Path(_)
-                if match *cx.typeck.pat_ty(pat).peel_refs().kind() {
-                    ty::Adt(adt, _) => adt.is_enum() || (adt.is_struct() && !adt.non_enum_variant().fields.is_empty()),
-                    ty::Tuple(tys) => !tys.is_empty(),
-                    ty::Array(_, len) => len.try_eval_target_usize(cx.tcx, cx.param_env) != Some(1),
-                    ty::Slice(..) => true,
-                    _ => false,
-                } =>
+            PatKind::Expr(PatExpr {
+                kind: PatExprKind::Path(_),
+                ..
+            }) if match *cx.typeck.pat_ty(pat).peel_refs().kind() {
+                ty::Adt(adt, _) => adt.is_enum() || (adt.is_struct() && !adt.non_enum_variant().fields.is_empty()),
+                ty::Tuple(tys) => !tys.is_empty(),
+                ty::Array(_, len) => len.try_to_target_usize(cx.tcx) != Some(1),
+                ty::Slice(..) => true,
+                _ => false,
+            } =>
             {
+                matches!(self, Self::Wild)
+            },
+
+            PatKind::Guard(..) => {
                 matches!(self, Self::Wild)
             },
 
@@ -353,7 +360,7 @@ impl<'a> PatState<'a> {
             },
             PatKind::Slice([sub_pat], _, []) | PatKind::Slice([], _, [sub_pat])
                 if let ty::Array(_, len) = *cx.typeck.pat_ty(pat).kind()
-                    && len.try_eval_target_usize(cx.tcx, cx.param_env) == Some(1) =>
+                    && len.try_to_target_usize(cx.tcx) == Some(1) =>
             {
                 self.add_pat(cx, sub_pat)
             },
@@ -379,9 +386,8 @@ impl<'a> PatState<'a> {
 
             PatKind::Wild
             | PatKind::Binding(_, _, _, None)
-            | PatKind::Lit(_)
+            | PatKind::Expr(_)
             | PatKind::Range(..)
-            | PatKind::Path(_)
             | PatKind::Never
             | PatKind::Err(_) => {
                 *self = PatState::Wild;
