@@ -8,8 +8,8 @@ rm -rf out/master/ || exit 0
 echo "Making the docs for master"
 mkdir out/master/
 cp util/gh-pages/index.html out/master
+cp util/gh-pages/theme.js out/master
 cp util/gh-pages/script.js out/master
-cp util/gh-pages/lints.json out/master
 cp util/gh-pages/style.css out/master
 
 if [[ -n $TAG_NAME ]]; then
@@ -45,6 +45,8 @@ if [[ -n $TAG_NAME ]]; then
   git add "$TAG_NAME"
   # Update the symlink
   git add stable
+  # Update the index.html file
+  git add index.html
   git commit -m "Add documentation for ${TAG_NAME} release: ${SHA}"
 elif [[ $BETA = "true" ]]; then
   if git diff --exit-code --quiet -- beta/; then

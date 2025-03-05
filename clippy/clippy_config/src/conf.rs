@@ -1,6 +1,10 @@
 use crate::ClippyConfiguration;
-use crate::msrvs::Msrv;
-use crate::types::{DisallowedPath, MacroMatcher, MatchLintBehaviour, PubUnderscoreFieldsBehaviour, Rename};
+use crate::types::{
+    DisallowedPath, DisallowedPathWithoutReplacement, MacroMatcher, MatchLintBehaviour, PubUnderscoreFieldsBehaviour,
+    Rename, SourceItemOrdering, SourceItemOrderingCategory, SourceItemOrderingModuleItemGroupings,
+    SourceItemOrderingModuleItemKind, SourceItemOrderingTraitAssocItemKind, SourceItemOrderingTraitAssocItemKinds,
+};
+use clippy_utils::msrvs::Msrv;
 use rustc_errors::Applicability;
 use rustc_session::Session;
 use rustc_span::edit_distance::edit_distance;
@@ -17,8 +21,9 @@ use std::{cmp, env, fmt, fs, io};
 #[rustfmt::skip]
 const DEFAULT_DOC_VALID_IDENTS: &[&str] = &[
     "KiB", "MiB", "GiB", "TiB", "PiB", "EiB",
+    "MHz", "GHz", "THz",
     "AccessKit",
-    "CoreFoundation", "CoreGraphics", "CoreText",
+    "CoAP", "CoreFoundation", "CoreGraphics", "CoreText",
     "DevOps",
     "Direct2D", "Direct3D", "DirectWrite", "DirectX",
     "ECMAScript",
@@ -46,6 +51,29 @@ const DEFAULT_ALLOWED_IDENTS_BELOW_MIN_CHARS: &[&str] = &["i", "j", "x", "y", "z
 const DEFAULT_ALLOWED_PREFIXES: &[&str] = &["to", "as", "into", "from", "try_into", "try_from"];
 const DEFAULT_ALLOWED_TRAITS_WITH_RENAMED_PARAMS: &[&str] =
     &["core::convert::From", "core::convert::TryFrom", "core::str::FromStr"];
+const DEFAULT_MODULE_ITEM_ORDERING_GROUPS: &[(&str, &[SourceItemOrderingModuleItemKind])] = {
+    #[allow(clippy::enum_glob_use)] // Very local glob use for legibility.
+    use SourceItemOrderingModuleItemKind::*;
+    &[
+        ("modules", &[ExternCrate, Mod, ForeignMod]),
+        ("use", &[Use]),
+        ("macros", &[Macro]),
+        ("global_asm", &[GlobalAsm]),
+        ("UPPER_SNAKE_CASE", &[Static, Const]),
+        ("PascalCase", &[TyAlias, Enum, Struct, Union, Trait, TraitAlias, Impl]),
+        ("lower_snake_case", &[Fn]),
+    ]
+};
+const DEFAULT_TRAIT_ASSOC_ITEM_KINDS_ORDER: &[SourceItemOrderingTraitAssocItemKind] = {
+    #[allow(clippy::enum_glob_use)] // Very local glob use for legibility.
+    use SourceItemOrderingTraitAssocItemKind::*;
+    &[Const, Type, Fn]
+};
+const DEFAULT_SOURCE_ITEM_ORDERING: &[SourceItemOrderingCategory] = {
+    #[allow(clippy::enum_glob_use)] // Very local glob use for legibility.
+    use SourceItemOrderingCategory::*;
+    &[Enum, Impl, Module, Struct, Trait]
+};
 
 /// Conf with parse errors
 #[derive(Default)]
@@ -97,6 +125,32 @@ impl ConfError {
     }
 }
 
+// Remove code tags and code behind '# 's, as they are not needed for the lint docs and --explain
+pub fn sanitize_explanation(raw_docs: &str) -> String {
+    // Remove tags and hidden code:
+    let mut explanation = String::with_capacity(128);
+    let mut in_code = false;
+    for line in raw_docs.lines() {
+        let line = line.strip_prefix(' ').unwrap_or(line);
+
+        if let Some(lang) = line.strip_prefix("```") {
+            let tag = lang.split_once(',').map_or(lang, |(left, _)| left);
+            if !in_code && matches!(tag, "" | "rust" | "ignore" | "should_panic" | "no_run" | "compile_fail") {
+                explanation += "```rust\n";
+            } else {
+                explanation += line;
+                explanation.push('\n');
+            }
+            in_code = !in_code;
+        } else if !(in_code && line.starts_with("# ")) {
+            explanation += line;
+            explanation.push('\n');
+        }
+    }
+
+    explanation
+}
+
 macro_rules! wrap_option {
     () => {
         None
@@ -127,7 +181,7 @@ macro_rules! define_Conf {
     )*) => {
         /// Clippy lint configuration
         pub struct Conf {
-            $($(#[doc = $doc])+ pub $name: $ty,)*
+            $($(#[cfg_attr(doc, doc = $doc)])+ pub $name: $ty,)*
         }
 
         mod defaults {
@@ -234,14 +288,20 @@ define_Conf! {
     /// Whether `dbg!` should be allowed in test functions or `#[cfg(test)]`
     #[lints(dbg_macro)]
     allow_dbg_in_tests: bool = false,
+    /// Whether `expect` should be allowed in code always evaluated at compile time
+    #[lints(expect_used)]
+    allow_expect_in_consts: bool = true,
     /// Whether `expect` should be allowed in test functions or `#[cfg(test)]`
     #[lints(expect_used)]
     allow_expect_in_tests: bool = false,
+    /// Whether `indexing_slicing` should be allowed in test functions or `#[cfg(test)]`
+    #[lints(indexing_slicing)]
+    allow_indexing_slicing_in_tests: bool = false,
     /// Whether to allow mixed uninlined format args, e.g. `format!("{} {}", a, foo.bar)`
     #[lints(uninlined_format_args)]
     allow_mixed_uninlined_format_args: bool = true,
     /// Whether to allow `r#""#` when `r""` can be used
-    #[lints(unnecessary_raw_string_hashes)]
+    #[lints(needless_raw_string_hashes)]
     allow_one_hash_in_raw_strings: bool = false,
     /// Whether `panic` should be allowed in test functions or `#[cfg(test)]`
     #[lints(panic)]
@@ -268,6 +328,9 @@ define_Conf! {
     #[lints(renamed_function_params)]
     allow_renamed_params_for: Vec<String> =
         DEFAULT_ALLOWED_TRAITS_WITH_RENAMED_PARAMS.iter().map(ToString::to_string).collect(),
+    /// Whether `unwrap` should be allowed in code always evaluated at compile time
+    #[lints(unwrap_used)]
+    allow_unwrap_in_consts: bool = true,
     /// Whether `unwrap` should be allowed in test functions or `#[cfg(test)]`
     #[lints(unwrap_used)]
     allow_unwrap_in_tests: bool = false,
@@ -366,7 +429,7 @@ define_Conf! {
     arithmetic_side_effects_allowed_unary: Vec<String> = <_>::default(),
     /// The maximum allowed size for arrays on the stack
     #[lints(large_const_arrays, large_stack_arrays)]
-    array_size_threshold: u64 = 512_000,
+    array_size_threshold: u64 = 16 * 1024,
     /// Suppress lints whenever the suggested change would cause breakage for other crates.
     #[lints(
         box_collection,
@@ -375,6 +438,7 @@ define_Conf! {
         linkedlist,
         needless_pass_by_ref_mut,
         option_option,
+        owned_cow,
         rc_buffer,
         rc_mutex,
         redundant_allocation,
@@ -391,7 +455,7 @@ define_Conf! {
     avoid_breaking_exported_api: bool = true,
     /// The list of types which may not be held across an await point.
     #[lints(await_holding_invalid_type)]
-    await_holding_invalid_types: Vec<DisallowedPath> = Vec::new(),
+    await_holding_invalid_types: Vec<DisallowedPathWithoutReplacement> = Vec::new(),
     /// DEPRECATED LINT: BLACKLISTED_NAME.
     ///
     /// Use the Disallowed Names lint instead
@@ -400,6 +464,9 @@ define_Conf! {
     /// For internal testing only, ignores the current `publish` settings in the Cargo manifest.
     #[lints(cargo_common_metadata)]
     cargo_ignore_publish: bool = false,
+    /// Whether to check MSRV compatibility in `#[test]` and `#[cfg(test)]` code.
+    #[lints(incompatible_msrv)]
+    check_incompatible_msrv_in_tests: bool = false,
     /// Whether to also run the listed lints on private items.
     #[lints(missing_errors_doc, missing_panics_doc, missing_safety_doc, unnecessary_safety_doc)]
     check_private_items: bool = false,
@@ -475,6 +542,26 @@ define_Conf! {
     /// The maximum size of the `Err`-variant in a `Result` returned from a function
     #[lints(result_large_err)]
     large_error_threshold: u64 = 128,
+    /// Whether to suggest reordering constructor fields when initializers are present.
+    ///
+    /// Warnings produced by this configuration aren't necessarily fixed by just reordering the fields. Even if the
+    /// suggested code would compile, it can change semantics if the initializer expressions have side effects. The
+    /// following example [from rust-clippy#11846] shows how the suggestion can run into borrow check errors:
+    ///
+    /// ```rust
+    /// struct MyStruct {
+    ///     vector: Vec<u32>,
+    ///     length: usize
+    /// }
+    /// fn main() {
+    ///     let vector = vec![1,2,3];
+    ///     MyStruct { length: vector.len(), vector};
+    /// }
+    /// ```
+    ///
+    /// [from rust-clippy#11846]: https://github.com/rust-lang/rust-clippy/issues/11846#issuecomment-1820747924
+    #[lints(inconsistent_struct_constructor)]
+    lint_inconsistent_struct_field_initializers: bool = false,
     /// The lower bound for linting decimal literals
     #[lints(decimal_literal_representation)]
     literal_representation_threshold: u64 = 16384,
@@ -506,6 +593,9 @@ define_Conf! {
     /// crate. For example, `pub(crate)` items.
     #[lints(missing_docs_in_private_items)]
     missing_docs_in_crate_items: bool = false,
+    /// The named groupings of different source item kinds within modules.
+    #[lints(arbitrary_source_item_ordering)]
+    module_item_order_groupings: SourceItemOrderingModuleItemGroupings = DEFAULT_MODULE_ITEM_ORDERING_GROUPS.into(),
     /// The minimum rust version that the project supports. Defaults to the `rust-version` field in `Cargo.toml`
     #[default_text = "current version"]
     #[lints(
@@ -527,34 +617,47 @@ define_Conf! {
         from_over_into,
         if_then_some_else_none,
         index_refutable_slice,
+        io_other_error,
         iter_kv_map,
         legacy_numeric_constants,
+        lines_filter_map_ok,
         manual_bits,
         manual_c_str_literals,
         manual_clamp,
+        manual_div_ceil,
+        manual_flatten,
         manual_hash_one,
         manual_is_ascii_check,
         manual_let_else,
+        manual_midpoint,
         manual_non_exhaustive,
+        manual_option_as_slice,
         manual_pattern_char_comparison,
         manual_range_contains,
         manual_rem_euclid,
+        manual_repeat_n,
         manual_retain,
+        manual_slice_fill,
         manual_split_once,
         manual_str_repeat,
         manual_strip,
         manual_try_fold,
         map_clone,
         map_unwrap_or,
+        map_with_unused_argument_over_ranges,
         match_like_matches_macro,
+        mem_replace_option_with_some,
         mem_replace_with_default,
         missing_const_for_fn,
         needless_borrow,
+        non_std_lazy_statics,
         option_as_ref_deref,
         option_map_unwrap_or,
         ptr_as_ptr,
         redundant_field_names,
         redundant_static_lifetimes,
+        repeat_vec_with_capacity,
+        same_item_push,
         seek_from_current,
         seek_rewind,
         transmute_ptr_to_ref,
@@ -567,7 +670,7 @@ define_Conf! {
         unused_trait_names,
         use_self,
     )]
-    msrv: Msrv = Msrv::empty(),
+    msrv: Msrv = Msrv::default(),
     /// The minimum size (in bytes) to consider a type for passing by reference instead of by value.
     #[lints(large_types_passed_by_value)]
     pass_by_value_size_limit: u64 = 256,
@@ -584,6 +687,9 @@ define_Conf! {
     /// The maximum number of single char bindings a scope may have
     #[lints(many_single_char_names)]
     single_char_binding_names_threshold: u64 = 4,
+    /// Which kind of elements should be ordered internally, possible values being `enum`, `impl`, `module`, `struct`, `trait`.
+    #[lints(arbitrary_source_item_ordering)]
+    source_item_ordering: SourceItemOrdering = DEFAULT_SOURCE_ITEM_ORDERING.into(),
     /// The maximum allowed stack size for functions in bytes
     #[lints(large_stack_frames)]
     stack_size_threshold: u64 = 512_000,
@@ -613,8 +719,11 @@ define_Conf! {
     /// The maximum number of lines a function or method can have
     #[lints(too_many_lines)]
     too_many_lines_threshold: u64 = 100,
+    /// The order of associated items in traits.
+    #[lints(arbitrary_source_item_ordering)]
+    trait_assoc_item_kinds_order: SourceItemOrderingTraitAssocItemKinds = DEFAULT_TRAIT_ASSOC_ITEM_KINDS_ORDER.into(),
     /// The maximum size (in bytes) to consider a `Copy` type for passing by value instead of by
-    /// reference. By default there is no limit
+    /// reference.
     #[default_text = "target_pointer_width * 2"]
     #[lints(trivially_copy_pass_by_ref)]
     trivial_copy_size_limit: Option<u64> = None,

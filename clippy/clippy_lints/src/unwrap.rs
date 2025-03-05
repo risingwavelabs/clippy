@@ -8,7 +8,6 @@ use rustc_hir::{BinOpKind, Body, Expr, ExprKind, FnDecl, HirId, Node, PathSegmen
 use rustc_hir_typeck::expr_use_visitor::{Delegate, ExprUseVisitor, PlaceWithHirId};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::hir::nested_filter;
-use rustc_middle::lint::in_external_macro;
 use rustc_middle::mir::FakeReadCause;
 use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_session::declare_lint_pass;
@@ -153,13 +152,12 @@ fn collect_unwrap_info<'tcx>(
         }
     } else if let ExprKind::Unary(UnOp::Not, expr) = &expr.kind {
         return collect_unwrap_info(cx, if_expr, expr, branch, !invert, false);
-    } else if let ExprKind::MethodCall(method_name, receiver, args, _) = &expr.kind
+    } else if let ExprKind::MethodCall(method_name, receiver, [], _) = &expr.kind
         && let Some(local_id) = path_to_local(receiver)
         && let ty = cx.typeck_results().expr_ty(receiver)
         && let name = method_name.ident.as_str()
         && (is_relevant_option_call(cx, ty, name) || is_relevant_result_call(cx, ty, name))
     {
-        assert!(args.is_empty());
         let unwrappable = match name {
             "is_some" | "is_ok" => true,
             "is_err" | "is_none" => false,
@@ -208,7 +206,7 @@ struct MutationVisitor<'tcx> {
 /// expression: that will be where the actual method call is.
 fn is_option_as_mut_use(tcx: TyCtxt<'_>, expr_id: HirId) -> bool {
     if let Node::Expr(mutating_expr) = tcx.parent_hir_node(expr_id)
-        && let ExprKind::MethodCall(path, ..) = mutating_expr.kind
+        && let ExprKind::MethodCall(path, _, [], _) = mutating_expr.kind
     {
         path.ident.name.as_str() == "as_mut"
     } else {
@@ -218,7 +216,7 @@ fn is_option_as_mut_use(tcx: TyCtxt<'_>, expr_id: HirId) -> bool {
 
 impl<'tcx> Delegate<'tcx> for MutationVisitor<'tcx> {
     fn borrow(&mut self, cat: &PlaceWithHirId<'tcx>, diag_expr_id: HirId, bk: ty::BorrowKind) {
-        if let ty::BorrowKind::MutBorrow = bk
+        if let ty::BorrowKind::Mutable = bk
             && is_potentially_local_place(self.local_id, &cat.place)
             && !is_option_as_mut_use(self.tcx, diag_expr_id)
         {
@@ -246,9 +244,9 @@ impl<'tcx> UnwrappableVariablesVisitor<'_, 'tcx> {
         let prev_len = self.unwrappables.len();
         for unwrap_info in collect_unwrap_info(self.cx, if_expr, cond, branch, else_branch, true) {
             let mut delegate = MutationVisitor {
-                tcx: self.cx.tcx,
                 is_mutated: false,
                 local_id: unwrap_info.local_id,
+                tcx: self.cx.tcx,
             };
 
             let vis = ExprUseVisitor::for_clippy(self.cx, cond.hir_id.owner.def_id, &mut delegate);
@@ -275,7 +273,7 @@ enum AsRefKind {
 /// Checks if the expression is a method call to `as_{ref,mut}` and returns the receiver of it.
 /// If it isn't, the expression itself is returned.
 fn consume_option_as_ref<'tcx>(expr: &'tcx Expr<'tcx>) -> (&'tcx Expr<'tcx>, Option<AsRefKind>) {
-    if let ExprKind::MethodCall(path, recv, ..) = expr.kind {
+    if let ExprKind::MethodCall(path, recv, [], _) = expr.kind {
         if path.ident.name == sym::as_ref {
             (recv, Some(AsRefKind::AsRef))
         } else if path.ident.name.as_str() == "as_mut" {
@@ -293,7 +291,7 @@ impl<'tcx> Visitor<'tcx> for UnwrappableVariablesVisitor<'_, 'tcx> {
 
     fn visit_expr(&mut self, expr: &'tcx Expr<'_>) {
         // Shouldn't lint when `expr` is in macro.
-        if in_external_macro(self.cx.tcx.sess, expr.span) {
+        if expr.span.in_external_macro(self.cx.tcx.sess.source_map()) {
             return;
         }
         if let Some(higher::If { cond, then, r#else }) = higher::If::hir(expr) {
@@ -303,7 +301,7 @@ impl<'tcx> Visitor<'tcx> for UnwrappableVariablesVisitor<'_, 'tcx> {
                 self.visit_branch(expr, cond, else_inner, true);
             }
         } else {
-            // find `unwrap[_err]()` calls:
+            // find `unwrap[_err]()` or `expect("...")` calls:
             if let ExprKind::MethodCall(method_name, self_arg, ..) = expr.kind
                 && let (self_arg, as_ref_kind) = consume_option_as_ref(self_arg)
                 && let Some(id) = path_to_local(self_arg)
@@ -376,8 +374,8 @@ impl<'tcx> Visitor<'tcx> for UnwrappableVariablesVisitor<'_, 'tcx> {
         }
     }
 
-    fn nested_visit_map(&mut self) -> Self::Map {
-        self.cx.tcx.hir()
+    fn maybe_tcx(&mut self) -> Self::MaybeTyCtxt {
+        self.cx.tcx
     }
 }
 
@@ -398,8 +396,8 @@ impl<'tcx> LateLintPass<'tcx> for Unwrap {
         }
 
         let mut v = UnwrappableVariablesVisitor {
-            cx,
             unwrappables: Vec::new(),
+            cx,
         };
 
         walk_fn(&mut v, kind, decl, body.id(), fn_id);

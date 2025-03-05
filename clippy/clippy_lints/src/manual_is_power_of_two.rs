@@ -11,10 +11,12 @@ use rustc_session::declare_lint_pass;
 
 declare_clippy_lint! {
     /// ### What it does
-    /// Checks for expressions like `x.count_ones() == 1` or `x & (x - 1) == 0`, with x and unsigned integer, which are manual
+    /// Checks for expressions like `x.count_ones() == 1` or `x & (x - 1) == 0`, with x and unsigned integer, which may be manual
     /// reimplementations of `x.is_power_of_two()`.
+    ///
     /// ### Why is this bad?
     /// Manual reimplementations of `is_power_of_two` increase code complexity for little benefit.
+    ///
     /// ### Example
     /// ```no_run
     /// let a: u32 = 4;
@@ -25,9 +27,9 @@ declare_clippy_lint! {
     /// let a: u32 = 4;
     /// let result = a.is_power_of_two();
     /// ```
-    #[clippy::version = "1.82.0"]
+    #[clippy::version = "1.83.0"]
     pub MANUAL_IS_POWER_OF_TWO,
-    complexity,
+    pedantic,
     "manually reimplementing `is_power_of_two`"
 }
 
@@ -41,21 +43,21 @@ impl LateLintPass<'_> for ManualIsPowerOfTwo {
             && bin_op.node == BinOpKind::Eq
         {
             // a.count_ones() == 1
-            if let ExprKind::MethodCall(method_name, reciever, _, _) = left.kind
+            if let ExprKind::MethodCall(method_name, receiver, [], _) = left.kind
                 && method_name.ident.as_str() == "count_ones"
-                && let &Uint(_) = cx.typeck_results().expr_ty(reciever).kind()
+                && let &Uint(_) = cx.typeck_results().expr_ty(receiver).kind()
                 && check_lit(right, 1)
             {
-                build_sugg(cx, expr, reciever, &mut applicability);
+                build_sugg(cx, expr, receiver, &mut applicability);
             }
 
             // 1 == a.count_ones()
-            if let ExprKind::MethodCall(method_name, reciever, _, _) = right.kind
+            if let ExprKind::MethodCall(method_name, receiver, [], _) = right.kind
                 && method_name.ident.as_str() == "count_ones"
-                && let &Uint(_) = cx.typeck_results().expr_ty(reciever).kind()
+                && let &Uint(_) = cx.typeck_results().expr_ty(receiver).kind()
                 && check_lit(left, 1)
             {
-                build_sugg(cx, expr, reciever, &mut applicability);
+                build_sugg(cx, expr, receiver, &mut applicability);
             }
 
             // a & (a - 1) == 0
@@ -113,8 +115,8 @@ impl LateLintPass<'_> for ManualIsPowerOfTwo {
     }
 }
 
-fn build_sugg(cx: &LateContext<'_>, expr: &Expr<'_>, reciever: &Expr<'_>, applicability: &mut Applicability) {
-    let snippet = snippet_with_applicability(cx, reciever.span, "..", applicability);
+fn build_sugg(cx: &LateContext<'_>, expr: &Expr<'_>, receiver: &Expr<'_>, applicability: &mut Applicability) {
+    let snippet = snippet_with_applicability(cx, receiver.span, "..", applicability);
 
     span_lint_and_sugg(
         cx,

@@ -25,14 +25,15 @@ pub(super) fn check<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
         return;
     }
 
-    let args: Vec<_> = match expr.kind {
-        ExprKind::Call(_, args) => args.iter().collect(),
-        ExprKind::MethodCall(_, receiver, args, _) => std::iter::once(receiver).chain(args.iter()).collect(),
+    let (receiver, args) = match expr.kind {
+        ExprKind::Call(_, args) => (None, args),
+        ExprKind::MethodCall(_, receiver, args, _) => (Some(receiver), args),
         _ => return,
     };
 
-    let args_to_recover = args
+    let args_to_recover = receiver
         .into_iter()
+        .chain(args)
         .filter(|arg| {
             if cx.typeck_results().expr_ty(arg).is_unit() && !utils::is_unit_literal(arg) {
                 !matches!(
@@ -148,7 +149,7 @@ fn is_empty_block(expr: &Expr<'_>) -> bool {
         expr.kind,
         ExprKind::Block(
             Block {
-                stmts: &[],
+                stmts: [],
                 expr: None,
                 ..
             },
@@ -176,7 +177,7 @@ fn fmt_stmts_and_call(
     stmts_and_call.push(call_snippet_with_replacements);
     stmts_and_call = stmts_and_call
         .into_iter()
-        .map(|v| reindent_multiline(v.into(), true, Some(call_expr_indent)).into_owned())
+        .map(|v| reindent_multiline(&v, true, Some(call_expr_indent)))
         .collect();
 
     let mut stmts_and_call_snippet = stmts_and_call.join(&format!("{}{}", ";\n", " ".repeat(call_expr_indent)));
@@ -184,8 +185,7 @@ fn fmt_stmts_and_call(
     let parent_node = cx.tcx.parent_hir_node(call_expr.hir_id);
     if !matches!(parent_node, Node::Block(_)) && !matches!(parent_node, Node::Stmt(_)) {
         let block_indent = call_expr_indent + 4;
-        stmts_and_call_snippet =
-            reindent_multiline(stmts_and_call_snippet.into(), true, Some(block_indent)).into_owned();
+        stmts_and_call_snippet = reindent_multiline(&stmts_and_call_snippet, true, Some(block_indent));
         stmts_and_call_snippet = format!(
             "{{\n{}{}\n{}}}",
             " ".repeat(block_indent),
