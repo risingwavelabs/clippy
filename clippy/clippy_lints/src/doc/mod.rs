@@ -1,15 +1,9 @@
 #![allow(clippy::lint_without_lint_pass)]
 
-mod lazy_continuation;
-mod too_long_first_doc_paragraph;
-
 use clippy_config::Conf;
 use clippy_utils::attrs::is_doc_hidden;
 use clippy_utils::diagnostics::{span_lint, span_lint_and_help, span_lint_and_then};
-use clippy_utils::macros::{is_panic, root_macro_call_first_node};
-use clippy_utils::ty::is_type_diagnostic_item;
-use clippy_utils::visitors::Visitable;
-use clippy_utils::{is_entrypoint_fn, is_trait_impl_item, method_chain_args};
+use clippy_utils::{is_entrypoint_fn, is_trait_impl_item};
 use pulldown_cmark::Event::{
     Code, DisplayMath, End, FootnoteReference, HardBreak, Html, InlineHtml, InlineMath, Rule, SoftBreak, Start,
     TaskListMarker, Text,
@@ -18,27 +12,28 @@ use pulldown_cmark::Tag::{BlockQuote, CodeBlock, FootnoteDefinition, Heading, It
 use pulldown_cmark::{BrokenLink, CodeBlockKind, CowStr, Options, TagEnd};
 use rustc_data_structures::fx::FxHashSet;
 use rustc_errors::Applicability;
-use rustc_hir::intravisit::{self, Visitor};
-use rustc_hir::{AnonConst, Attribute, Expr, ImplItemKind, ItemKind, Node, Safety, TraitItemKind};
+use rustc_hir::{Attribute, ImplItemKind, ItemKind, Node, Safety, TraitItemKind};
 use rustc_lint::{EarlyContext, EarlyLintPass, LateContext, LateLintPass, LintContext};
-use rustc_middle::hir::nested_filter;
-use rustc_middle::ty;
 use rustc_resolve::rustdoc::{
     DocFragment, add_doc_fragment, attrs_to_doc_fragments, main_body_opts, source_span_for_markdown_range,
     span_of_fragments,
 };
 use rustc_session::impl_lint_pass;
+use rustc_span::Span;
 use rustc_span::edition::Edition;
-use rustc_span::{Span, sym};
 use std::ops::Range;
 use url::Url;
 
+mod doc_comment_double_space_linebreaks;
+mod doc_suspicious_footnotes;
 mod include_in_doc_without_cfg;
+mod lazy_continuation;
 mod link_with_quotes;
 mod markdown;
 mod missing_headers;
 mod needless_doctest_main;
 mod suspicious_doc_comments;
+mod too_long_first_doc_paragraph;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -98,7 +93,7 @@ declare_clippy_lint! {
     /// ```no_run
     /// //! <code>[first](x)second</code>
     /// ```
-    #[clippy::version = "1.86.0"]
+    #[clippy::version = "1.87.0"]
     pub DOC_LINK_CODE,
     nursery,
     "link with code back-to-back with other code"
@@ -191,6 +186,19 @@ declare_clippy_lint! {
     ///     } else {
     ///         x / y
     ///     }
+    /// }
+    /// ```
+    ///
+    /// Individual panics within a function can be ignored with `#[expect]` or
+    /// `#[allow]`:
+    ///
+    /// ```no_run
+    /// # use std::num::NonZeroUsize;
+    /// pub fn will_not_panic(x: usize) {
+    ///     #[expect(clippy::missing_panics_doc, reason = "infallible")]
+    ///     let y = NonZeroUsize::new(1).unwrap();
+    ///
+    ///     // If any panics are added in the future the lint will still catch them
     /// }
     /// ```
     #[clippy::version = "1.51.0"]
@@ -567,6 +575,70 @@ declare_clippy_lint! {
     "link reference defined in list item or quote"
 }
 
+declare_clippy_lint! {
+    /// ### What it does
+    /// Detects doc comment linebreaks that use double spaces to separate lines, instead of back-slash (`\`).
+    ///
+    /// ### Why is this bad?
+    /// Double spaces, when used as doc comment linebreaks, can be difficult to see, and may
+    /// accidentally be removed during automatic formatting or manual refactoring. The use of a back-slash (`\`)
+    /// is clearer in this regard.
+    ///
+    /// ### Example
+    /// The two replacement dots in this example represent a double space.
+    /// ```no_run
+    /// /// This command takes two numbers as inputs and··
+    /// /// adds them together, and then returns the result.
+    /// fn add(l: i32, r: i32) -> i32 {
+    ///     l + r
+    /// }
+    /// ```
+    ///
+    /// Use instead:
+    /// ```no_run
+    /// /// This command takes two numbers as inputs and\
+    /// /// adds them together, and then returns the result.
+    /// fn add(l: i32, r: i32) -> i32 {
+    ///     l + r
+    /// }
+    /// ```
+    #[clippy::version = "1.87.0"]
+    pub DOC_COMMENT_DOUBLE_SPACE_LINEBREAKS,
+    pedantic,
+    "double-space used for doc comment linebreak instead of `\\`"
+}
+
+declare_clippy_lint! {
+    /// ### What it does
+    /// Detects syntax that looks like a footnote reference.
+    ///
+    /// Rustdoc footnotes are compatible with GitHub-Flavored Markdown (GFM).
+    /// GFM does not parse a footnote reference unless its definition also
+    /// exists. This lint checks for footnote references with missing
+    /// definitions, unless it thinks you're writing a regex.
+    ///
+    /// ### Why is this bad?
+    /// This probably means that a footnote was meant to exist,
+    /// but was not written.
+    ///
+    /// ### Example
+    /// ```no_run
+    /// /// This is not a footnote[^1], because no definition exists.
+    /// fn my_fn() {}
+    /// ```
+    /// Use instead:
+    /// ```no_run
+    /// /// This is a footnote[^1].
+    /// ///
+    /// /// [^1]: defined here
+    /// fn my_fn() {}
+    /// ```
+    #[clippy::version = "1.88.0"]
+    pub DOC_SUSPICIOUS_FOOTNOTES,
+    suspicious,
+    "looks like a link or footnote ref, but with no definition"
+}
+
 pub struct Documentation {
     valid_idents: FxHashSet<String>,
     check_private_items: bool,
@@ -598,6 +670,8 @@ impl_lint_pass!(Documentation => [
     DOC_OVERINDENTED_LIST_ITEMS,
     TOO_LONG_FIRST_DOC_PARAGRAPH,
     DOC_INCLUDE_WITHOUT_CFG,
+    DOC_COMMENT_DOUBLE_SPACE_LINEBREAKS,
+    DOC_SUSPICIOUS_FOOTNOTES,
 ]);
 
 impl EarlyLintPass for Documentation {
@@ -622,20 +696,16 @@ impl<'tcx> LateLintPass<'tcx> for Documentation {
                     self.check_private_items,
                 );
                 match item.kind {
-                    ItemKind::Fn { sig, body: body_id, .. } => {
+                    ItemKind::Fn { sig, body, .. } => {
                         if !(is_entrypoint_fn(cx, item.owner_id.to_def_id())
                             || item.span.in_external_macro(cx.tcx.sess.source_map()))
                         {
-                            let body = cx.tcx.hir_body(body_id);
-
-                            let panic_info = FindPanicUnwrap::find_span(cx, cx.tcx.typeck(item.owner_id), body.value);
                             missing_headers::check(
                                 cx,
                                 item.owner_id,
                                 sig,
                                 headers,
-                                Some(body_id),
-                                panic_info,
+                                Some(body),
                                 self.check_private_items,
                             );
                         }
@@ -662,15 +732,7 @@ impl<'tcx> LateLintPass<'tcx> for Documentation {
                 if let TraitItemKind::Fn(sig, ..) = trait_item.kind
                     && !trait_item.span.in_external_macro(cx.tcx.sess.source_map())
                 {
-                    missing_headers::check(
-                        cx,
-                        trait_item.owner_id,
-                        sig,
-                        headers,
-                        None,
-                        None,
-                        self.check_private_items,
-                    );
+                    missing_headers::check(cx, trait_item.owner_id, sig, headers, None, self.check_private_items);
                 }
             },
             Node::ImplItem(impl_item) => {
@@ -678,16 +740,12 @@ impl<'tcx> LateLintPass<'tcx> for Documentation {
                     && !impl_item.span.in_external_macro(cx.tcx.sess.source_map())
                     && !is_trait_impl_item(cx, impl_item.hir_id())
                 {
-                    let body = cx.tcx.hir_body(body_id);
-
-                    let panic_span = FindPanicUnwrap::find_span(cx, cx.tcx.typeck(impl_item.owner_id), body.value);
                     missing_headers::check(
                         cx,
                         impl_item.owner_id,
                         sig,
                         headers,
                         Some(body_id),
-                        panic_span,
                         self.check_private_items,
                     );
                 }
@@ -704,7 +762,10 @@ struct Fragments<'a> {
 }
 
 impl Fragments<'_> {
-    fn span(self, cx: &LateContext<'_>, range: Range<usize>) -> Option<Span> {
+    /// get the span for the markdown range. Note that this function is not cheap, use it with
+    /// caution.
+    #[must_use]
+    fn span(&self, cx: &LateContext<'_>, range: Range<usize>) -> Option<Span> {
         source_span_for_markdown_range(cx.tcx, self.doc, &range, self.fragments)
     }
 }
@@ -797,6 +858,7 @@ fn check_attrs(cx: &LateContext<'_>, valid_idents: &FxHashSet<String>, attrs: &[
             doc: &doc,
             fragments: &fragments,
         },
+        attrs,
     ))
 }
 
@@ -845,19 +907,18 @@ fn check_for_code_clusters<'a, Events: Iterator<Item = (pulldown_cmark::Event<'a
                 if let Some(start) = code_starts_at
                     && let Some(end) = code_ends_at
                     && code_includes_link
+                    && let Some(span) = fragments.span(cx, start..end)
                 {
-                    if let Some(span) = fragments.span(cx, start..end) {
-                        span_lint_and_then(cx, DOC_LINK_CODE, span, "code link adjacent to code text", |diag| {
-                            let sugg = format!("<code>{}</code>", doc[start..end].replace('`', ""));
-                            diag.span_suggestion_verbose(
-                                span,
-                                "wrap the entire group in `<code>` tags",
-                                sugg,
-                                Applicability::MaybeIncorrect,
-                            );
-                            diag.help("separate code snippets will be shown with a gap");
-                        });
-                    }
+                    span_lint_and_then(cx, DOC_LINK_CODE, span, "code link adjacent to code text", |diag| {
+                        let sugg = format!("<code>{}</code>", doc[start..end].replace('`', ""));
+                        diag.span_suggestion_verbose(
+                            span,
+                            "wrap the entire group in `<code>` tags",
+                            sugg,
+                            Applicability::MaybeIncorrect,
+                        );
+                        diag.help("separate code snippets will be shown with a gap");
+                    });
                 }
                 code_includes_link = false;
                 code_starts_at = None;
@@ -878,6 +939,7 @@ fn check_doc<'a, Events: Iterator<Item = (pulldown_cmark::Event<'a>, Range<usize
     events: Events,
     doc: &str,
     fragments: Fragments<'_>,
+    attrs: &[Attribute],
 ) -> DocHeaders {
     // true if a safety header was found
     let mut headers = DocHeaders::default();
@@ -894,6 +956,7 @@ fn check_doc<'a, Events: Iterator<Item = (pulldown_cmark::Event<'a>, Range<usize
     let mut paragraph_range = 0..0;
     let mut code_level = 0;
     let mut blockquote_level = 0;
+    let mut collected_breaks: Vec<Span> = Vec::new();
     let mut is_first_paragraph = true;
 
     let mut containers = Vec::new();
@@ -1010,11 +1073,7 @@ fn check_doc<'a, Events: Iterator<Item = (pulldown_cmark::Event<'a>, Range<usize
                                 start -= 1;
                             }
 
-                            if start > range.start {
-                                start - range.start
-                            } else {
-                                0
-                            }
+                            start.saturating_sub(range.start)
                         }
                     } else {
                         0
@@ -1046,9 +1105,7 @@ fn check_doc<'a, Events: Iterator<Item = (pulldown_cmark::Event<'a>, Range<usize
                     );
                 } else {
                     for (text, range, assoc_code_level) in text_to_check {
-                        if let Some(span) = fragments.span(cx, range) {
-                            markdown::check(cx, valid_idents, &text, span, assoc_code_level, blockquote_level);
-                        }
+                        markdown::check(cx, valid_idents, &text, &fragments, range, assoc_code_level, blockquote_level);
                     }
                 }
                 text_to_check = Vec::new();
@@ -1059,19 +1116,28 @@ fn check_doc<'a, Events: Iterator<Item = (pulldown_cmark::Event<'a>, Range<usize
             | TaskListMarker(_) | Code(_) | Rule | InlineMath(..) | DisplayMath(..) => (),
             SoftBreak | HardBreak => {
                 if !containers.is_empty()
-                    && let Some((next_event, next_range)) = events.peek()
-                    && let Some(next_span) = fragments.span(cx, next_range.clone())
-                    && let Some(span) = fragments.span(cx, range.clone())
                     && !in_footnote_definition
+                    // Tabs aren't handled correctly vvvv
+                    && !doc[range.clone()].contains('\t')
+                    && let Some((next_event, next_range)) = events.peek()
                     && !matches!(next_event, End(_))
                 {
                     lazy_continuation::check(
                         cx,
                         doc,
                         range.end..next_range.start,
-                        Span::new(span.hi(), next_span.lo(), span.ctxt(), span.parent()),
+                        &fragments,
                         &containers[..],
                     );
+                }
+
+
+                if event == HardBreak
+                    && !doc[range.clone()].trim().starts_with('\\')
+                    && let Some(span) = fragments.span(cx, range.clone())
+                    && !span.from_expansion()
+                    {
+                    collected_breaks.push(span);
                 }
             },
             Text(text) => {
@@ -1117,79 +1183,17 @@ fn check_doc<'a, Events: Iterator<Item = (pulldown_cmark::Event<'a>, Range<usize
                         // Don't check the text associated with external URLs
                         continue;
                     }
-                    text_to_check.push((text, range, code_level));
+                    text_to_check.push((text, range.clone(), code_level));
+                    doc_suspicious_footnotes::check(cx, doc, range, &fragments, attrs);
                 }
             }
             FootnoteReference(_) => {}
         }
     }
+
+    doc_comment_double_space_linebreaks::check(cx, &collected_breaks);
+
     headers
-}
-
-struct FindPanicUnwrap<'a, 'tcx> {
-    cx: &'a LateContext<'tcx>,
-    is_const: bool,
-    panic_span: Option<Span>,
-    typeck_results: &'tcx ty::TypeckResults<'tcx>,
-}
-
-impl<'a, 'tcx> FindPanicUnwrap<'a, 'tcx> {
-    pub fn find_span(
-        cx: &'a LateContext<'tcx>,
-        typeck_results: &'tcx ty::TypeckResults<'tcx>,
-        body: impl Visitable<'tcx>,
-    ) -> Option<(Span, bool)> {
-        let mut vis = Self {
-            cx,
-            is_const: false,
-            panic_span: None,
-            typeck_results,
-        };
-        body.visit(&mut vis);
-        vis.panic_span.map(|el| (el, vis.is_const))
-    }
-}
-
-impl<'tcx> Visitor<'tcx> for FindPanicUnwrap<'_, 'tcx> {
-    type NestedFilter = nested_filter::OnlyBodies;
-
-    fn visit_expr(&mut self, expr: &'tcx Expr<'_>) {
-        if self.panic_span.is_some() {
-            return;
-        }
-
-        if let Some(macro_call) = root_macro_call_first_node(self.cx, expr) {
-            if is_panic(self.cx, macro_call.def_id)
-                || matches!(
-                    self.cx.tcx.item_name(macro_call.def_id).as_str(),
-                    "assert" | "assert_eq" | "assert_ne"
-                )
-            {
-                self.is_const = self.cx.tcx.hir_is_inside_const_context(expr.hir_id);
-                self.panic_span = Some(macro_call.span);
-            }
-        }
-
-        // check for `unwrap` and `expect` for both `Option` and `Result`
-        if let Some(arglists) = method_chain_args(expr, &["unwrap"]).or(method_chain_args(expr, &["expect"])) {
-            let receiver_ty = self.typeck_results.expr_ty(arglists[0].0).peel_refs();
-            if is_type_diagnostic_item(self.cx, receiver_ty, sym::Option)
-                || is_type_diagnostic_item(self.cx, receiver_ty, sym::Result)
-            {
-                self.panic_span = Some(expr.span);
-            }
-        }
-
-        // and check sub-expressions
-        intravisit::walk_expr(self, expr);
-    }
-
-    // Panics in const blocks will cause compilation to fail.
-    fn visit_anon_const(&mut self, _: &'tcx AnonConst) {}
-
-    fn maybe_tcx(&mut self) -> Self::MaybeTyCtxt {
-        self.cx.tcx
-    }
 }
 
 #[expect(clippy::range_plus_one)] // inclusive ranges aren't the same type
