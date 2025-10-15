@@ -19,6 +19,7 @@ extern crate rustc_span;
 extern crate tikv_jemalloc_sys as jemalloc_sys;
 
 use clippy_utils::sym;
+use declare_clippy_lint::LintListBuilder;
 use rustc_interface::interface;
 use rustc_session::EarlyDiagCtxt;
 use rustc_session::config::ErrorOutputType;
@@ -156,8 +157,13 @@ impl rustc_driver::Callbacks for ClippyCallbacks {
                 (previous)(sess, lint_store);
             }
 
+            let mut list_builder = LintListBuilder::default();
+            list_builder.insert(clippy_lints::declared_lints::LINTS);
+            list_builder.register(lint_store);
+
             let conf = clippy_config::Conf::read(sess, &conf_path);
-            clippy_lints::register_lints(lint_store, conf);
+            clippy_lints::register_lint_passes(lint_store, conf);
+
             #[cfg(feature = "internal")]
             clippy_lints_internal::register_lints(lint_store);
         }));
@@ -324,7 +330,8 @@ pub fn main() {
 
         // Do not run Clippy for Cargo's info queries so that invalid CLIPPY_ARGS are not cached
         // https://github.com/rust-lang/cargo/issues/14385
-        let info_query = has_arg(&orig_args, "-vV") || has_arg(&orig_args, "--print");
+        let info_query = has_arg(&orig_args, "-vV")
+            || arg_value(&orig_args, "--print", |val| val != "crate-root-lint-levels").is_some();
 
         let clippy_enabled = !cap_lints_allow && relevant_package && !info_query;
         if clippy_enabled {

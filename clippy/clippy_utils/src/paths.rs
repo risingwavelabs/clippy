@@ -10,9 +10,10 @@ use rustc_data_structures::fx::FxHashMap;
 use rustc_hir::def::Namespace::{MacroNS, TypeNS, ValueNS};
 use rustc_hir::def::{DefKind, Namespace, Res};
 use rustc_hir::def_id::{DefId, LOCAL_CRATE, LocalDefId};
-use rustc_hir::{ImplItemRef, ItemKind, Node, OwnerId, TraitItemRef, UseKind};
+use rustc_hir::{ItemKind, Node, UseKind};
 use rustc_lint::LateContext;
 use rustc_middle::ty::fast_reject::SimplifiedType;
+use rustc_middle::ty::layout::HasTyCtxt;
 use rustc_middle::ty::{FloatTy, IntTy, Ty, TyCtxt, UintTy};
 use rustc_span::{Ident, STDLIB_STABLE_CRATES, Symbol};
 use std::sync::OnceLock;
@@ -74,8 +75,8 @@ impl PathLookup {
     }
 
     /// Returns the list of [`DefId`]s that the path resolves to
-    pub fn get(&self, cx: &LateContext<'_>) -> &[DefId] {
-        self.once.get_or_init(|| lookup_path(cx.tcx, self.ns, self.path))
+    pub fn get<'tcx>(&self, tcx: &impl HasTyCtxt<'tcx>) -> &[DefId] {
+        self.once.get_or_init(|| lookup_path(tcx.tcx(), self.ns, self.path))
     }
 
     /// Returns the single [`DefId`] that the path resolves to, this can only be used for paths into
@@ -90,8 +91,8 @@ impl PathLookup {
     }
 
     /// Checks if the path resolves to the given `def_id`
-    pub fn matches(&self, cx: &LateContext<'_>, def_id: DefId) -> bool {
-        self.get(cx).contains(&def_id)
+    pub fn matches<'tcx>(&self, tcx: &impl HasTyCtxt<'tcx>, def_id: DefId) -> bool {
+        self.get(&tcx.tcx()).contains(&def_id)
     }
 
     /// Resolves `maybe_path` to a [`DefId`] and checks if the [`PathLookup`] matches it
@@ -100,8 +101,8 @@ impl PathLookup {
     }
 
     /// Checks if the path resolves to `ty`'s definition, must be an `Adt`
-    pub fn matches_ty(&self, cx: &LateContext<'_>, ty: Ty<'_>) -> bool {
-        ty.ty_adt_def().is_some_and(|adt| self.matches(cx, adt.did()))
+    pub fn matches_ty<'tcx>(&self, tcx: &impl HasTyCtxt<'tcx>, ty: Ty<'_>) -> bool {
+        ty.ty_adt_def().is_some_and(|adt| self.matches(&tcx.tcx(), adt.did()))
     }
 }
 
@@ -125,6 +126,11 @@ path_macros! {
     value_path: PathNS::Value,
     macro_path: PathNS::Macro,
 }
+
+pub static F16_CONSTS: PathLookup = type_path!(core::f16::consts);
+pub static F32_CONSTS: PathLookup = type_path!(core::f32::consts);
+pub static F64_CONSTS: PathLookup = type_path!(core::f64::consts);
+pub static F128_CONSTS: PathLookup = type_path!(core::f128::consts);
 
 // Paths in external crates
 pub static FUTURES_IO_ASYNCREADEXT: PathLookup = type_path!(futures_util::AsyncReadExt);
@@ -284,14 +290,6 @@ fn local_item_child_by_name(tcx: TyCtxt<'_>, local_id: LocalDefId, ns: PathNS, n
         _ => return None,
     };
 
-    let res = |ident: Ident, owner_id: OwnerId| {
-        if ident.name == name && ns.matches(tcx.def_kind(owner_id).ns()) {
-            Some(owner_id.to_def_id())
-        } else {
-            None
-        }
-    };
-
     match item_kind {
         ItemKind::Mod(_, r#mod) => r#mod.item_ids.iter().find_map(|&item_id| {
             let item = tcx.hir_item(item_id);
@@ -307,17 +305,20 @@ fn local_item_child_by_name(tcx: TyCtxt<'_>, local_id: LocalDefId, ns: PathNS, n
                 } else {
                     None
                 }
+            } else if let Some(ident) = item.kind.ident()
+                && ident.name == name
+                && ns.matches(tcx.def_kind(item.owner_id).ns())
+            {
+                Some(item.owner_id.to_def_id())
             } else {
-                res(item.kind.ident()?, item_id.owner_id)
+                None
             }
         }),
-        ItemKind::Impl(r#impl) => r#impl
-            .items
-            .iter()
-            .find_map(|&ImplItemRef { ident, id, .. }| res(ident, id.owner_id)),
-        ItemKind::Trait(.., trait_item_refs) => trait_item_refs
-            .iter()
-            .find_map(|&TraitItemRef { ident, id, .. }| res(ident, id.owner_id)),
+        ItemKind::Impl(..) | ItemKind::Trait(..) => tcx
+            .associated_items(local_id)
+            .filter_by_name_unhygienic(name)
+            .find(|assoc_item| ns.matches(Some(assoc_item.namespace())))
+            .map(|assoc_item| assoc_item.def_id),
         _ => None,
     }
 }

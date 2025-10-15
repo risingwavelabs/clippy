@@ -46,7 +46,7 @@ pub(super) fn check(cx: &LateContext<'_>, expr: &Expr<'_>, from: &Expr<'_>, to: 
 fn is_expr_const_aligned(cx: &LateContext<'_>, expr: &Expr<'_>, to: &Ty<'_>) -> bool {
     match expr.kind {
         ExprKind::Call(fun, _) => is_align_of_call(cx, fun, to),
-        ExprKind::Lit(lit) => is_literal_aligned(cx, lit, to),
+        ExprKind::Lit(lit) => is_literal_aligned(cx, &lit, to),
         _ => false,
     }
 }
@@ -72,7 +72,7 @@ fn is_literal_aligned(cx: &LateContext<'_>, lit: &Spanned<LitKind>, to: &Ty<'_>)
     cx.tcx
         .layout_of(cx.typing_env().as_query_input(to_mid_ty))
         .is_ok_and(|layout| {
-            let align = u128::from(layout.align.abi.bytes());
+            let align = u128::from(layout.align.bytes());
             u128::from(val) <= align
         })
 }
