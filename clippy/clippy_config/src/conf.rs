@@ -33,8 +33,9 @@ const DEFAULT_DOC_VALID_IDENTS: &[&str] = &[
     "GPLv2", "GPLv3",
     "GitHub", "GitLab",
     "IPv4", "IPv6",
+    "InfiniBand", "RoCE",
     "ClojureScript", "CoffeeScript", "JavaScript", "PostScript", "PureScript", "TypeScript",
-    "WebAssembly",
+    "PowerPC", "WebAssembly",
     "NaN", "NaNs",
     "OAuth", "GraphQL",
     "OCaml",
@@ -44,7 +45,7 @@ const DEFAULT_DOC_VALID_IDENTS: &[&str] = &[
     "WebP", "OpenExr", "YCbCr", "sRGB",
     "TensorFlow",
     "TrueType",
-    "iOS", "macOS", "FreeBSD", "NetBSD", "OpenBSD",
+    "iOS", "macOS", "FreeBSD", "NetBSD", "OpenBSD", "NixOS",
     "TeX", "LaTeX", "BibTeX", "BibLaTeX",
     "MinGW",
     "CamelCase",
@@ -569,16 +570,33 @@ define_Conf! {
     /// The maximum cognitive complexity a function can have
     #[lints(cognitive_complexity)]
     cognitive_complexity_threshold: u64 = 25,
+    /// The minimum digits a const float literal must have to supress the `excessive_precicion` lint
+    #[lints(excessive_precision)]
+    const_literal_digits_threshold: usize = 30,
     /// DEPRECATED LINT: CYCLOMATIC_COMPLEXITY.
     ///
     /// Use the Cognitive Complexity lint instead.
     #[conf_deprecated("Please use `cognitive-complexity-threshold` instead", cognitive_complexity_threshold)]
     cyclomatic_complexity_threshold: u64 = 25,
     /// The list of disallowed macros, written as fully qualified paths.
+    ///
+    /// **Fields:**
+    /// - `path` (required): the fully qualified path to the macro that should be disallowed
+    /// - `reason` (optional): explanation why this macro is disallowed
+    /// - `replacement` (optional): suggested alternative macro
+    /// - `allow-invalid` (optional, `false` by default): when set to `true`, it will ignore this entry
+    ///   if the path doesn't exist, instead of emitting an error
     #[disallowed_paths_allow_replacements = true]
     #[lints(disallowed_macros)]
     disallowed_macros: Vec<DisallowedPath> = Vec::new(),
     /// The list of disallowed methods, written as fully qualified paths.
+    ///
+    /// **Fields:**
+    /// - `path` (required): the fully qualified path to the method that should be disallowed
+    /// - `reason` (optional): explanation why this method is disallowed
+    /// - `replacement` (optional): suggested alternative method
+    /// - `allow-invalid` (optional, `false` by default): when set to `true`, it will ignore this entry
+    ///   if the path doesn't exist, instead of emitting an error
     #[disallowed_paths_allow_replacements = true]
     #[lints(disallowed_methods)]
     disallowed_methods: Vec<DisallowedPath> = Vec::new(),
@@ -588,6 +606,13 @@ define_Conf! {
     #[lints(disallowed_names)]
     disallowed_names: Vec<String> = DEFAULT_DISALLOWED_NAMES.iter().map(ToString::to_string).collect(),
     /// The list of disallowed types, written as fully qualified paths.
+    ///
+    /// **Fields:**
+    /// - `path` (required): the fully qualified path to the type that should be disallowed
+    /// - `reason` (optional): explanation why this type is disallowed
+    /// - `replacement` (optional): suggested alternative type
+    /// - `allow-invalid` (optional, `false` by default): when set to `true`, it will ignore this entry
+    ///   if the path doesn't exist, instead of emitting an error
     #[disallowed_paths_allow_replacements = true]
     #[lints(disallowed_types)]
     disallowed_types: Vec<DisallowedPath> = Vec::new(),
@@ -641,9 +666,9 @@ define_Conf! {
     /// The maximum size of the `Err`-variant in a `Result` returned from a function
     #[lints(result_large_err)]
     large_error_threshold: u64 = 128,
-    /// Whether collapsible `if` chains are linted if they contain comments inside the parts
+    /// Whether collapsible `if` and `else if` chains are linted if they contain comments inside the parts
     /// that would be collapsed.
-    #[lints(collapsible_if)]
+    #[lints(collapsible_else_if, collapsible_if)]
     lint_commented_code: bool = false,
     /// Whether to suggest reordering constructor fields when initializers are present.
     /// DEPRECATED CONFIGURATION: lint-inconsistent-struct-field-initializers
@@ -716,6 +741,7 @@ define_Conf! {
         from_over_into,
         if_then_some_else_none,
         index_refutable_slice,
+        inefficient_to_string,
         io_other_error,
         iter_kv_map,
         legacy_numeric_constants,
@@ -754,7 +780,7 @@ define_Conf! {
         needless_borrow,
         non_std_lazy_statics,
         option_as_ref_deref,
-        option_map_unwrap_or,
+        or_fun_call,
         ptr_as_ptr,
         question_mark,
         redundant_field_names,
@@ -762,17 +788,18 @@ define_Conf! {
         repeat_vec_with_capacity,
         same_item_push,
         seek_from_current,
-        seek_rewind,
         to_digit_is_some,
         transmute_ptr_to_ref,
         tuple_array_conversions,
         type_repetition_in_bounds,
-        unchecked_duration_subtraction,
+        unchecked_time_subtraction,
         uninlined_format_args,
         unnecessary_lazy_evaluations,
+        unnecessary_unwrap,
         unnested_or_patterns,
         unused_trait_names,
         use_self,
+        zero_ptr,
     )]
     msrv: Msrv = Msrv::default(),
     /// The minimum size (in bytes) to consider a type for passing by reference instead of by value.

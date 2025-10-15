@@ -5,10 +5,10 @@
 
 use crate::msrvs::{self, Msrv};
 use hir::LangItem;
-use rustc_attr_data_structures::{RustcVersion, StableSince};
 use rustc_const_eval::check_consts::ConstCx;
 use rustc_hir as hir;
 use rustc_hir::def_id::DefId;
+use rustc_hir::{RustcVersion, StableSince};
 use rustc_infer::infer::TyCtxtInferExt;
 use rustc_infer::traits::Obligation;
 use rustc_lint::LateContext;
@@ -31,6 +31,21 @@ pub fn is_min_const_fn<'tcx>(cx: &LateContext<'tcx>, body: &Body<'tcx>, msrv: Ms
 
     for local in &body.local_decls {
         check_ty(cx, local.ty, local.source_info.span, msrv)?;
+    }
+    if !msrv.meets(cx, msrvs::CONST_FN_TRAIT_BOUND)
+        && let Some(sized_did) = cx.tcx.lang_items().sized_trait()
+        && let Some(meta_sized_did) = cx.tcx.lang_items().meta_sized_trait()
+        && cx.tcx.param_env(def_id).caller_bounds().iter().any(|bound| {
+            bound.as_trait_clause().is_some_and(|clause| {
+                let did = clause.def_id();
+                did != sized_did && did != meta_sized_did
+            })
+        })
+    {
+        return Err((
+            body.span,
+            "non-`Sized` trait clause before `const_fn_trait_bound` is stabilized".into(),
+        ));
     }
     // impl trait is gone in MIR, so check the return type manually
     check_ty(
@@ -71,7 +86,7 @@ fn check_ty<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>, span: Span, msrv: Msrv) 
             ty::FnPtr(..) => {
                 return Err((span, "function pointers in const fn are unstable".into()));
             },
-            ty::Dynamic(preds, _, _) => {
+            ty::Dynamic(preds, _) => {
                 for pred in *preds {
                     match pred.skip_binder() {
                         ty::ExistentialPredicate::AutoTrait(_) | ty::ExistentialPredicate::Projection(_) => {
@@ -111,7 +126,7 @@ fn check_rvalue<'tcx>(
 ) -> McfResult {
     match rvalue {
         Rvalue::ThreadLocalRef(_) => Err((span, "cannot access thread local storage in const fn".into())),
-        Rvalue::Len(place) | Rvalue::Discriminant(place) | Rvalue::Ref(_, _, place) | Rvalue::RawPtr(_, place) => {
+        Rvalue::Discriminant(place) | Rvalue::Ref(_, _, place) | Rvalue::RawPtr(_, place) => {
             check_place(cx, *place, span, body, msrv)
         },
         Rvalue::CopyForDeref(place) => check_place(cx, *place, span, body, msrv),
@@ -126,7 +141,8 @@ fn check_rvalue<'tcx>(
             | CastKind::FloatToFloat
             | CastKind::FnPtrToPtr
             | CastKind::PtrToPtr
-            | CastKind::PointerCoercion(PointerCoercion::MutToConstPointer | PointerCoercion::ArrayToPointer, _),
+            | CastKind::PointerCoercion(PointerCoercion::MutToConstPointer | PointerCoercion::ArrayToPointer, _)
+            | CastKind::Subtype,
             operand,
             _,
         ) => check_operand(cx, operand, span, body, msrv),
@@ -159,10 +175,6 @@ fn check_rvalue<'tcx>(
         },
         Rvalue::Cast(CastKind::PointerExposeProvenance, _, _) => {
             Err((span, "casting pointers to ints is unstable in const fn".into()))
-        },
-        Rvalue::Cast(CastKind::PointerCoercion(PointerCoercion::DynStar, _), _, _) => {
-            // FIXME(dyn-star)
-            unimplemented!()
         },
         Rvalue::Cast(CastKind::Transmute, _, _) => Err((
             span,
@@ -301,7 +313,6 @@ fn check_place<'tcx>(
             | ProjectionElem::OpaqueCast(..)
             | ProjectionElem::Downcast(..)
             | ProjectionElem::Subslice { .. }
-            | ProjectionElem::Subtype(_)
             | ProjectionElem::Index(_)
             | ProjectionElem::UnwrapUnsafeBinder(_) => {},
         }
@@ -409,11 +420,11 @@ pub fn is_stable_const_fn(cx: &LateContext<'_>, def_id: DefId, msrv: Msrv) -> bo
             .lookup_const_stability(def_id)
             .or_else(|| {
                 cx.tcx
-                    .trait_of_item(def_id)
+                    .trait_of_assoc(def_id)
                     .and_then(|trait_def_id| cx.tcx.lookup_const_stability(trait_def_id))
             })
             .is_none_or(|const_stab| {
-                if let rustc_attr_data_structures::StabilityLevel::Stable { since, .. } = const_stab.level {
+                if let rustc_hir::StabilityLevel::Stable { since, .. } = const_stab.level {
                     // Checking MSRV is manually necessary because `rustc` has no such concept. This entire
                     // function could be removed if `rustc` provided a MSRV-aware version of `is_stable_const_fn`.
                     // as a part of an unimplemented MSRV check https://github.com/rust-lang/rust/issues/65262.
@@ -421,7 +432,7 @@ pub fn is_stable_const_fn(cx: &LateContext<'_>, def_id: DefId, msrv: Msrv) -> bo
                     let const_stab_rust_version = match since {
                         StableSince::Version(version) => version,
                         StableSince::Current => RustcVersion::CURRENT,
-                        StableSince::Err => return false,
+                        StableSince::Err(_) => return false,
                     };
 
                     msrv.meets(cx, const_stab_rust_version)
@@ -436,7 +447,7 @@ fn is_ty_const_destruct<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, body: &Body<'tcx>
     // FIXME(const_trait_impl, fee1-dead) revert to const destruct once it works again
     #[expect(unused)]
     fn is_ty_const_destruct_unused<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, body: &Body<'tcx>) -> bool {
-        // If this doesn't need drop at all, then don't select `~const Destruct`.
+        // If this doesn't need drop at all, then don't select `[const] Destruct`.
         if !ty.needs_drop(tcx, body.typing_env(tcx)) {
             return false;
         }
@@ -464,7 +475,7 @@ fn is_ty_const_destruct<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, body: &Body<'tcx>
 
         let ocx = ObligationCtxt::new(&infcx);
         ocx.register_obligations(impl_src.nested_obligations());
-        ocx.select_all_or_error().is_empty()
+        ocx.evaluate_obligations_error_on_ambiguity().is_empty()
     }
 
     !ty.needs_drop(tcx, ConstCx::new(tcx, body).typing_env)
